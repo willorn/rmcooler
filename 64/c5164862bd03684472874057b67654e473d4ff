@@ -1,0 +1,14 @@
+src/main.rs
+  h_1dbd1a036f33d4 2483,2486
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "64c5164862bd03684472874057b67654e473d4ff",
+  "prompts": {},
+  "humans": {
+    "h_1dbd1a036f33d4": {
+      "author": "Tianyi <66897894+willorn@users.noreply.github.com>"
+    }
+  }
+}
