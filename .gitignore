@@ -1,0 +1,14 @@
+# 编译产物
+/target
+
+# AppleScript 编译产物（cooler.applescript 重新 osacompile 即可生成）
+*.app
+
+# 系统文件
+.DS_Store
+
+# 本机迁移记录（含个人路径，不入库）
+MOVE_NOTE.md
+
+# 本机 cargo 配置（如有人加了本地偏好）
+.cargo/config.toml

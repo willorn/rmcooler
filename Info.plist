@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>io.github.willorn.rmcooler</string>
+    <key>CFBundleName</key>
+    <string>rmcooler</string>
+    <key>CFBundleDisplayName</key>
+    <string>rmcooler</string>
+    <key>CFBundleExecutable</key>
+    <string>rmcooler</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>rmcooler 需要通过蓝牙连接红魔散热器以调节风扇与制冷。</string>
+    <key>NSBluetoothPeripheralUsageDescription</key>
+    <string>rmcooler 需要通过蓝牙连接红魔散热器以调节风扇与制冷。</string>
+</dict>
+</plist>

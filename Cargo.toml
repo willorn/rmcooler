@@ -1,0 +1,23 @@
+[package]
+name = "rmcooler"
+version = "0.1.0"
+edition = "2021"
+description = "命令行控制红魔散热器 8 Pro（RM Magcooler 8pro / PA1256）"
+
+[dependencies]
+btleplug = "0.11"
+futures = "0.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "process", "io-util"] }
+objc2 = "0.5"
+objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSStatusBar", "NSStatusItem", "NSMenu", "NSMenuItem", "NSResponder", "NSRunningApplication", "NSControl", "NSStatusItem"] }
+objc2-foundation = { version = "0.2", features = ["NSString", "NSTimer", "NSObject"] }
+libc = "0.2"
+
+[dev-dependencies]
+uuid = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = false
