@@ -786,7 +786,7 @@ async fn autopilot(args: &[String]) -> R<()> {
     let interval: u64 = get("--interval").and_then(|s| s.parse().ok()).unwrap_or(8);
     let idle_min: u64 = get("--idle-min").and_then(|s| s.parse().ok()).unwrap_or(5);
     let min_level: u8 = get("--min").and_then(|s| s.parse().ok()).unwrap_or(2);
-    let max_level: u8 = get("--max").and_then(|s| s.parse().ok()).unwrap_or(8);
+    let max_level: u8 = get("--max").and_then(|s| s.parse().ok()).unwrap_or_else(load_auto_max);
     let verbose = args.iter().any(|a| a == "-v" || a == "--verbose");
 
     println!("自动巡航已启动");
@@ -1042,6 +1042,46 @@ fn apply_frame(n: ValueNotification, ui: &mut Ui) {
     }
 }
 
+
+
+/* ===================== 配置文件 ===================== */
+// ~/.rmcooler/config，每行 key=value。只存用户显式设置过的偏好（如自动上限），
+// 未设置的项用代码内默认值。
+
+fn config_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".rmcooler").join("config")
+}
+
+fn config_get(key: &str) -> Option<String> {
+    let content = std::fs::read_to_string(config_path()).ok()?;
+    content
+        .lines()
+        .find_map(|l| l.split_once('=').filter(|(k, _)| *k == key))
+        .map(|(_, v)| v.to_string())
+}
+
+fn config_set(key: &str, value: &str) {
+    if let Some(dir) = config_path().parent() {
+        std::fs::create_dir_all(dir).ok();
+    }
+    let mut lines: Vec<String> = std::fs::read_to_string(config_path())
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.split_once('=').map_or(false, |(k, _)| k == key))
+        .map(|l| l.to_string())
+        .collect();
+    lines.push(format!("{key}={value}"));
+    let _ = std::fs::write(config_path(), lines.join("\n") + "\n");
+}
+
+/// 自动调档上限：配置文件优先，未设置默认 8
+fn load_auto_max() -> u8 {
+    config_get("auto_max")
+        .and_then(|v| v.parse::<u8>().ok())
+        .filter(|l| (1..=8).contains(l))
+        .unwrap_or(8)
+}
 
 /* ===================== 单实例锁 ===================== */
 // 两个实例会互抢同一条 BLE 连接，表现成「按键时灵时不灵」。
@@ -2350,6 +2390,7 @@ thread_local! {
     static STATUS_ITEM: RefCell<Option<Retained<NSStatusItem>>> = const { RefCell::new(None) };
     static MB_MENU: RefCell<Option<Retained<NSMenu>>> = const { RefCell::new(None) };
     static MB_TARGET: RefCell<Option<Retained<MenuTarget>>> = const { RefCell::new(None) };
+    static MB_SUB_LIMIT: RefCell<Option<Retained<NSMenu>>> = const { RefCell::new(None) };
 }
 
 static CMD_TX_MB: OnceLock<tokio::sync::mpsc::Sender<BleCmd>> = OnceLock::new();
@@ -2421,6 +2462,14 @@ declare_class!(
                     ui.device = "重连中…".to_string();
                     ui.log("已请求重连");
                 }
+                30..=37 => {
+                    // 自动调档上限：写入配置，重启保留
+                    let lv = (tag - 29) as u8;
+                    ui.auto_max = lv;
+                    ui.auto_last = None;
+                    config_set("auto_max", &lv.to_string());
+                    ui.log(format!("自动调档上限 → {lv} 档（已保存）"));
+                }
                 99 => std::process::exit(0),
                 _ => {}
             }
@@ -2453,6 +2502,18 @@ declare_class!(
             });
 
             // 菜单勾选状态
+            MB_SUB_LIMIT.with_borrow_mut(|slot| {
+                if let Some(sub) = slot {
+                    for item in sub.itemArray().iter() {
+                        let tag = item.tag();
+                        if (30..=37).contains(&tag) {
+                            let state: i64 =
+                                if ui.auto_max == (tag - 29) as u8 { 1 } else { 0 };
+                            let _: () = unsafe { objc2::msg_send![item, setState: state] };
+                        }
+                    }
+                }
+            });
             MB_MENU.with_borrow_mut(|slot| {
                 if let Some(menu) = slot {
                     let items = menu.itemArray();
@@ -2462,6 +2523,7 @@ declare_class!(
                             1..=8 => ui.level == Some(tag as u8),
                             20 => ui.hall == Some(true),
                             21 => ui.autopilot,
+                            30..=37 => ui.auto_max == (tag - 29) as u8,
                             _ => continue,
                         };
                         let state: i64 = if on { 1 } else { 0 };
@@ -2521,6 +2583,22 @@ unsafe fn setup_menubar(mtm: MainThreadMarker) -> Retained<NSStatusItem> {
     mk(21, "自动调档");
     mk(22, "手动重连");
 
+    // 自动上限子菜单：点选即写入配置
+    let limit_parent = NSMenuItem::new(mtm);
+    unsafe { limit_parent.setTitle(&NSString::from_str("自动上限")) };
+    let sub = NSMenu::new(mtm);
+    for l in 1..=8u8 {
+        let mi = NSMenuItem::new(mtm);
+        mi.setTag(29 + l as isize);
+        unsafe { mi.setTitle(&NSString::from_str(&format!("最高 {l} 档"))) };
+        unsafe { mi.setAction(Some(sel!(menuAction:))) };
+        mi.setTarget(Some(&target));
+        sub.addItem(&mi);
+    }
+    limit_parent.setSubmenu(Some(&sub));
+    menu.addItem(&limit_parent);
+    MB_SUB_LIMIT.with_borrow_mut(|slot| *slot = Some(sub));
+
     let sep3 = NSMenuItem::separatorItem(mtm);
     menu.addItem(&sep3);
     mk(99, "退出");
@@ -2556,7 +2634,7 @@ pub async fn menubar_main(detached: bool) -> R<()> {
     let shared = Arc::new(Mutex::new(Ui::default()));
     {
         let mut ui = shared.lock().unwrap();
-        ui.auto_max = 8;
+        ui.auto_max = load_auto_max();
         ui.autopilot = true; // 连上即巡航
         ui.connected = true;
         ui.device = device_label(&first).await;
