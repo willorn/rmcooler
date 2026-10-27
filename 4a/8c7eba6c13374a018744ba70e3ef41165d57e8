@@ -1,0 +1,19 @@
+src/main.rs
+  s_3022cfca500944::t_0a35f5434c2960 789,1046-1085,2393,2465-2472,2505-2516,2526,2586-2601,2637
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4a8c7eba6c13374a018744ba70e3ef41165d57e8",
+  "prompts": {},
+  "sessions": {
+    "s_3022cfca500944": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1773d-dcde-7282-87a1-e29c844463d2",
+        "model": "route-mvlwa49d-xkgpzx/cline-pass/deepseek-v4.1-flash-1017"
+      },
+      "human_author": "Tianyi <66897894+willorn@users.noreply.github.com>"
+    }
+  }
+}
