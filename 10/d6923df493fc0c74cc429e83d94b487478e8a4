@@ -1,0 +1,33 @@
+红魔散热器.command
+  h_8195c5342f3ab5 1-14
+Cargo.lock
+  h_8195c5342f3ab5 1-1026
+cooler.applescript
+  h_8195c5342f3ab5 1-51
+build.rs
+  h_8195c5342f3ab5 1-10
+README.md
+  h_8195c5342f3ab5 1-80
+Cargo.toml
+  h_8195c5342f3ab5 1-23
+src/main.rs
+  h_8195c5342f3ab5 1-1980,1982-2712
+  h_8195c5342f3ab5 1981
+Info.plist
+  h_8195c5342f3ab5 1-24
+LICENSE
+  h_8195c5342f3ab5 1-21
+.gitignore
+  h_8195c5342f3ab5 1-14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "10d6923df493fc0c74cc429e83d94b487478e8a4",
+  "prompts": {},
+  "humans": {
+    "h_8195c5342f3ab5": {
+      "author": "Tianyi <willorn@qq.com>"
+    }
+  }
+}
