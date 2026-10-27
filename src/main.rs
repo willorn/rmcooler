@@ -2480,13 +2480,10 @@ declare_class!(
             let Some(state) = SHARED_MB.get() else { return };
             let ui = state.lock().unwrap();
 
-            // 状态栏标题：温度 + 档位，一眼可见
+            // 状态栏标题：只显示档位（温度在菜单里看）
             let title = if ui.connected {
                 format!(
-                    "{}° · {}档",
-                    ui.temp
-                        .map(|t| t.to_string())
-                        .unwrap_or_else(|| "?".into()),
+                    "{}档",
                     ui.level
                         .map(|l| l.to_string())
                         .unwrap_or_else(|| "?".into())
