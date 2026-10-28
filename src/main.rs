@@ -199,10 +199,18 @@ async fn run(args: &[String]) -> R<()> {
         return autopilot(&args[1..]).await;
     }
 
-    // 数据摘要
+    // 数据摘要 + HTML 图表
     if cmd == "report" {
         let date = args.get(1).cloned().unwrap_or_else(today_str);
-        return report(&date);
+        report(&date)?;
+        match report_html(&date) {
+            Ok(html) => {
+                println!("图表：{}", html.display());
+                let _ = std::process::Command::new("open").arg(&html).spawn();
+            }
+            Err(e) => println!("（图表生成失败：{e}）"),
+        }
+        return Ok(());
     }
 
     // 后台服务管理
@@ -1631,6 +1639,163 @@ fn report(date: &str) -> R<()> {
     println!("自动关制冷 {} 次", off_count);
 
     Ok(())
+}
+
+
+/* ===================== HTML 报告 ===================== */
+// hm report 顺带生成一份 HTML 图表，浏览器打开看当天曲线。
+
+fn report_rows(date: &str) -> Result<Vec<Vec<String>>, String> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let path = PathBuf::from(home)
+        .join(".rmcooler")
+        .join(format!("history-{date}.csv"));
+    if !path.exists() {
+        return Err(format!("{date} 没有记录（{}）", path.display()));
+    }
+    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut rows = Vec::new();
+    for line in content.lines().skip(1) {
+        let cols: Vec<String> = line.split(',').map(|x| x.to_string()).collect();
+        if cols.len() >= 10 && !cols[0].is_empty() {
+            rows.push(cols);
+        }
+    }
+    if rows.is_empty() {
+        return Err(format!("{date} 有文件但没有采样"));
+    }
+    Ok(rows)
+}
+
+/// 一条折线（数据自行归一化到 [min,max]）
+fn spark_svg(data: &[f32], w: usize, h: usize, min: f32, max: f32, color: &str) -> String {
+    let n = data.len();
+    if n < 2 {
+        return String::new();
+    }
+    let range = (max - min).max(0.001);
+    let mut pts = Vec::with_capacity(n);
+    for (i, &v) in data.iter().enumerate() {
+        let x = i as f32 / (n - 1) as f32 * w as f32;
+        let y = h as f32 - (v - min) / range * h as f32;
+        pts.push(format!("{x:.1},{y:.1}"));
+    }
+    format!(
+        r#"<polyline fill="none" stroke="{color}" stroke-width="1.3" stroke-linejoin="round" points="{}"/>"#,
+        pts.join(" ")
+    )
+}
+
+fn stat_triple(v: &[f32]) -> (f32, f32, f32) {
+    // (低, 均, 高)
+    let mn = v.iter().cloned().fold(f32::INFINITY, f32::min);
+    let mx = v.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let avg = v.iter().sum::<f32>() / v.len() as f32;
+    (mn, avg, mx)
+}
+
+fn report_html(date: &str) -> R<PathBuf> {
+    let rows = report_rows(date)?;
+    let f32_of = |c: &str| c.parse::<f32>().ok();
+
+    // 采样到最多 800 点，避免 SVG 太大
+    let step = (rows.len() / 800).max(1);
+    let sample: Vec<&Vec<String>> = rows.iter().step_by(step).collect();
+    let col = |i: usize| -> Vec<f32> {
+        sample.iter().filter_map(|r| f32_of(&r[i])).collect()
+    };
+    let rad = col(1);
+    let rpm = col(2);
+    let power = col(3);
+    let cpu = col(6);
+
+    let (r_min, r_avg, r_max) = stat_triple(&rad);
+    let (_, p_avg, p_max) = stat_triple(&power);
+    let (_, c_avg, c_max) = stat_triple(&cpu);
+    let (_, rpm_avg, _) = stat_triple(&rpm);
+
+    // 运行时长
+    let to_secs = |t: &str| -> u32 {
+        let v: Vec<u32> = t.split(':').filter_map(|x| x.parse().ok()).collect();
+        if v.len() == 3 { v[0] * 3600 + v[1] * 60 + v[2] } else { 0 }
+    };
+    let dur = to_secs(&rows[rows.len() - 1][0]).saturating_sub(to_secs(&rows[0][0]));
+
+    // 档位分布
+    let mut dist = [0u32; 9];
+    for r in &rows {
+        if let Ok(l) = r[4].parse::<usize>() {
+            if (1..=8).contains(&l) {
+                dist[l] += 1;
+            }
+        }
+    }
+    let dist_html: String = (1..=8)
+        .filter(|l| dist[*l] > 0)
+        .map(|l| {
+            let pct = dist[l] as f32 / rows.len() as f32 * 100.0;
+            format!(r#"<div class="seg" style="flex:{:.0}">{l}档 {pct:.0}%</div>"#, dist[l])
+        })
+        .collect();
+
+    const W: usize = 820;
+    const H: usize = 180;
+    let dur_min = dur / 60;
+    let cards = format!(
+        r#"<div class="cards">
+<div class="card"><div class="v">{r_avg:.1}°</div><div class="l">散热片均温</div><div class="s">{r_min:.0} ~ {r_max:.0}°C</div></div>
+<div class="card"><div class="v">{c_max:.1}°</div><div class="l">CPU 峰值</div><div class="s">均 {c_avg:.1}°C</div></div>
+<div class="card"><div class="v">{p_avg:.0}W</div><div class="l">平均功耗</div><div class="s">峰 {p_max:.0}W</div></div>
+<div class="card"><div class="v">{dur_min}分</div><div class="l">运行时长</div><div class="s">{rpm_avg:.0} rpm 均速</div></div>
+</div>"#);
+
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>rmcooler · {date}</title>
+<style>
+:root{{color-scheme:light dark}}
+body{{font-family:-apple-system,"PingFang SC",sans-serif;margin:0;padding:32px;background:#f6f7f9;color:#1c1c1e}}
+@media(prefers-color-scheme:dark){{body{{background:#131316;color:#e5e5ea}}}}
+.wrap{{max-width:900px;margin:0 auto}}
+h1{{font-size:22px;margin:0 0 4px}} .sub{{color:#8e8e93;margin:0 0 24px;font-size:13px}}
+.cards{{display:flex;gap:12px;margin-bottom:24px;flex-wrap:wrap}}
+.card{{flex:1;min-width:150px;background:#fff;border-radius:14px;padding:18px;box-shadow:0 1px 3px rgba(0,0,0,.06)}}
+@media(prefers-color-scheme:dark){{.card{{background:#1c1c1e}}}}
+.card .v{{font-size:26px;font-weight:700}} .card .l{{color:#8e8e93;font-size:12px;margin-top:4px}} .card .s{{color:#8e8e93;font-size:11px;margin-top:2px}}
+.panel{{background:#fff;border-radius:14px;padding:18px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.06)}}
+@media(prefers-color-scheme:dark){{.panel{{background:#1c1c1e}}}}
+.panel h2{{font-size:14px;margin:0 0 8px;color:#48484a}}
+@media(prefers-color-scheme:dark){{.panel h2{{color:#c7c7cc}}}}
+.bar{{display:flex;border-radius:8px;overflow:hidden;margin-top:8px}}
+.seg{{background:#e8e8ed;color:#48484a;font-size:11px;padding:6px 4px;text-align:center;white-space:nowrap}}
+@media(prefers-color-scheme:dark){{.seg{{background:#2c2c2e;color:#c7c7cc}}}}
+</style></head><body><div class="wrap">
+<h1>红魔散热器 · {date}</h1>
+<p class="sub">{rows_len} 条采样 · 自动巡航数据 · 由 rmcooler 生成</p>
+{cards}
+<div class="panel"><h2>散热片温度（{r_min:.0} ~ {r_max:.0}°C）</h2>
+<svg viewBox="0 0 {W} {H}" width="100%">{rad_svg}</svg></div>
+<div class="panel"><h2>CPU 温度（{c_min:.0} ~ {c_max:.0}°C）</h2>
+<svg viewBox="0 0 {W} {H}" width="100%">{cpu_svg}</svg></div>
+<div class="panel"><h2>功耗（{p_min:.0} ~ {p_max:.0}W）</h2>
+<svg viewBox="0 0 {W} {H}" width="100%">{power_svg}</svg></div>
+<div class="panel"><h2>档位分布</h2><div class="bar">{dist_html}</div></div>
+</div></body></html>"#,
+        rows_len = rows.len(),
+        rad_svg = spark_svg(&rad, W, H, r_min, r_max, "#ff3b30"),
+        cpu_svg = spark_svg(&cpu, W, H, 0.0, 100.0, "#0a84ff"),
+        power_svg = spark_svg(&power, W, H, 0.0, 40.0, "#30d158"),
+        c_min = cpu.iter().cloned().fold(f32::INFINITY, f32::min),
+        p_min = power.iter().cloned().fold(f32::INFINITY, f32::min),
+    );
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let out = PathBuf::from(home)
+        .join(".rmcooler")
+        .join(format!("report-{date}.html"));
+    std::fs::write(&out, html).map_err(|e| format!("写 HTML 失败: {e}"))?;
+    Ok(out)
 }
 
 /* ===================== 后台服务 ===================== */
