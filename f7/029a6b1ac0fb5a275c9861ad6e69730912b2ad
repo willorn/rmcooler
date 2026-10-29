@@ -1,0 +1,19 @@
+Cargo.toml
+  s_c1dbf6fb4c1ecd::t_88801b3ab05cf3 12
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f7029a6b1ac0fb5a275c9861ad6e69730912b2ad",
+  "prompts": {},
+  "sessions": {
+    "s_c1dbf6fb4c1ecd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18770-8af3-7653-b619-73b6cd0f223b",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Tianyi <66897894+willorn@users.noreply.github.com>"
+    }
+  }
+}
