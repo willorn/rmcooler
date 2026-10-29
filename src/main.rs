@@ -2379,22 +2379,157 @@ use objc2::runtime::{NSObject, NSObjectProtocol};
 use objc2::DeclaredClass;
 use objc2::{sel, ClassType};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
+    NSApplication, NSApplicationActivationPolicy, NSButton, NSMenuItem, NSPopover,
+    NSPopoverBehavior, NSPopUpButton, NSStatusBar, NSStatusBarButton, NSStatusItem,
+    NSTextField, NSView, NSViewController,
 };
-use objc2_foundation::{MainThreadMarker, NSString, NSTimer};
+use objc2_foundation::{MainThreadMarker, NSRect, NSRectEdge, NSPoint, NSSize, NSString, NSTimer};
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::mpsc;
 
 thread_local! {
     static STATUS_ITEM: RefCell<Option<Retained<NSStatusItem>>> = const { RefCell::new(None) };
-    static MB_MENU: RefCell<Option<Retained<NSMenu>>> = const { RefCell::new(None) };
     static MB_TARGET: RefCell<Option<Retained<MenuTarget>>> = const { RefCell::new(None) };
-    static MB_SUB_LIMIT: RefCell<Option<Retained<NSMenu>>> = const { RefCell::new(None) };
+    static MB_POPOVER: RefCell<Option<Retained<NSPopover>>> = const { RefCell::new(None) };
+    static MB_STATUS_BTN: RefCell<Option<Retained<NSStatusBarButton>>> = const { RefCell::new(None) };
+    static MB_VALUE1: RefCell<Option<Retained<NSTextField>>> = const { RefCell::new(None) };
+    static MB_VALUE2: RefCell<Option<Retained<NSTextField>>> = const { RefCell::new(None) };
+    static MB_LEVEL_BTNS: RefCell<Vec<Retained<NSButton>>> = const { RefCell::new(Vec::new()) };
+    static MB_LIMIT_POPUP: RefCell<Option<Retained<NSPopUpButton>>> = const { RefCell::new(None) };
 }
 
 static CMD_TX_MB: OnceLock<tokio::sync::mpsc::Sender<BleCmd>> = OnceLock::new();
 static SHARED_MB: OnceLock<Arc<Mutex<Ui>>> = OnceLock::new();
+
+/// 档位/开关动作统一分发（菜单与按钮共用）
+fn dispatch_action(tag: isize) {
+    let Some(tx) = CMD_TX_MB.get() else { return };
+    let Some(state) = SHARED_MB.get() else { return };
+    let mut ui = state.lock().unwrap();
+    match tag {
+        1..=8 => {
+            let _ = tx.try_send(BleCmd::Fan(tag as u8));
+            ui.level = Some(tag as u8);
+            ui.auto_last = None;
+            if ui.autopilot {
+                ui.manual_until = Some(Instant::now() + Duration::from_secs(60));
+                ui.log(format!("→ 第 {tag} 档（手动接管 60 秒）"));
+            } else {
+                ui.log(format!("→ 第 {tag} 档"));
+            }
+        }
+        20 => {
+            let want = ui.hall != Some(true);
+            let _ = tx.try_send(BleCmd::Hall(want));
+            ui.hall = Some(want);
+            ui.log(if want { "→ 制冷 开" } else { "→ 制冷 关" });
+        }
+        21 => {
+            ui.autopilot = !ui.autopilot;
+            if ui.autopilot {
+                if ui.diablo == Some(true) {
+                    let _ = tx.try_send(BleCmd::Diablo(false));
+                    ui.diablo = Some(false);
+                }
+                if ui.auto_mode == Some(true) {
+                    let _ = tx.try_send(BleCmd::Auto(false));
+                    ui.auto_mode = Some(false);
+                }
+                ui.manual_until = None;
+                ui.auto_last = None;
+                ui.log("自动调档 开");
+            } else {
+                ui.log("自动调档 关");
+            }
+        }
+        22 => {
+            let _ = tx.try_send(BleCmd::Reconnect);
+            ui.connected = false;
+            ui.device = "重连中…".to_string();
+            ui.log("已请求重连");
+        }
+        30..=37 => {
+            let lv = (tag - 29) as u8;
+            ui.auto_max = lv;
+            ui.auto_last = None;
+            config_set("auto_max", &lv.to_string());
+            ui.log(format!("自动调档上限 → {lv} 档（已保存）"));
+        }
+        99 => std::process::exit(0),
+        _ => {}
+    }
+}
+
+/// 展开/收起弹出面板
+fn toggle_popover() {
+    MB_POPOVER.with_borrow(|slot| {
+        let Some(pop) = slot else { return };
+        if unsafe { pop.isShown() } {
+            unsafe { pop.performClose(None) };
+        } else {
+            MB_STATUS_BTN.with_borrow(|b| {
+                if let Some(btn) = b {
+                    let rect = btn.bounds();
+                    unsafe {
+                        pop.showRelativeToRect_ofView_preferredEdge(rect, btn, NSRectEdge::MinY)
+                    };
+                }
+            });
+        }
+    });
+}
+
+/// 每秒刷新面板数值、档位勾选、上限选中、状态栏标题
+fn refresh_panel(ui: &Ui) {
+    // 状态栏标题：档位
+    let title = if ui.connected {
+        format!("{}档", ui.level.map(|l| l.to_string()).unwrap_or_else(|| "?".into()))
+    } else {
+        "重连中…".to_string()
+    };
+    #[allow(deprecated)]
+    STATUS_ITEM.with_borrow_mut(|slot| {
+        if let Some(item) = slot {
+            unsafe { item.setTitle(Some(&*NSString::from_str(&title))) };
+        }
+    });
+
+    // 面板两个数值行
+    let t = ui.temp.map(|x| x.to_string()).unwrap_or_else(|| "?".into());
+    let c = ui.cpu_temp.map(|x| format!("{x:.0}")).unwrap_or_else(|| "?".into());
+    let r = ui.rpm.map(|x| x.to_string()).unwrap_or_else(|| "?".into());
+    let pw = ui.power.map(|x| x.to_string()).unwrap_or_else(|| "?".into());
+    let l1 = format!("散热片 {t}°C    CPU {c}°C");
+    let l2 = format!("转速 {r} rpm    功率 {pw} W");
+    MB_VALUE1.with_borrow_mut(|slot| {
+        if let Some(lb) = slot {
+            unsafe { lb.setStringValue(&NSString::from_str(&l1)) };
+        }
+    });
+    MB_VALUE2.with_borrow_mut(|slot| {
+        if let Some(lb) = slot {
+            unsafe { lb.setStringValue(&NSString::from_str(&l2)) };
+        }
+    });
+
+    // 档位按钮勾选
+    MB_LEVEL_BTNS.with_borrow_mut(|btns| {
+        for b in btns.iter() {
+            let tag = unsafe { b.tag() };
+            let on = ui.level == Some(tag as u8);
+            let st: i64 = if on { 1 } else { 0 };
+            let _: () = unsafe { objc2::msg_send![b, setState: st] };
+        }
+    });
+
+    // 上限下拉选中
+    MB_LIMIT_POPUP.with_borrow_mut(|slot| {
+        if let Some(pop) = slot {
+            unsafe { pop.selectItemAtIndex((ui.auto_max as isize) - 1) };
+        }
+    });
+}
 
 declare_class!(
     struct MenuTarget;
@@ -2414,123 +2549,109 @@ declare_class!(
     unsafe impl MenuTarget {
         #[method(menuAction:)]
         unsafe fn menu_action(&self, sender: Option<&NSMenuItem>) {
-            let Some(sender) = sender else { return };
-            let tag = sender.tag();
-            let Some(tx) = CMD_TX_MB.get() else { return };
-            let Some(state) = SHARED_MB.get() else { return };
-            let mut ui = state.lock().unwrap();
+            let Some(s) = sender else { return };
+            dispatch_action(s.tag());
+        }
 
-            match tag {
-                1..=8 => {
-                    let _ = tx.try_send(BleCmd::Fan(tag as u8));
-                    ui.level = Some(tag as u8);
-                    ui.auto_last = None;
-                    if ui.autopilot {
-                        ui.manual_until = Some(Instant::now() + Duration::from_secs(60));
-                        ui.log(format!("→ 第 {tag} 档（手动接管 60 秒）"));
-                    } else {
-                        ui.log(format!("→ 第 {tag} 档"));
-                    }
-                }
-                20 => {
-                    let want = ui.hall != Some(true);
-                    let _ = tx.try_send(BleCmd::Hall(want));
-                    ui.hall = Some(want);
-                    ui.log(if want { "→ 制冷 开" } else { "→ 制冷 关" });
-                }
-                21 => {
-                    ui.autopilot = !ui.autopilot;
-                    if ui.autopilot {
-                        if ui.diablo == Some(true) {
-                            let _ = tx.try_send(BleCmd::Diablo(false));
-                            ui.diablo = Some(false);
-                        }
-                        if ui.auto_mode == Some(true) {
-                            let _ = tx.try_send(BleCmd::Auto(false));
-                            ui.auto_mode = Some(false);
-                        }
-                        ui.manual_until = None;
-                        ui.auto_last = None;
-                        ui.log("自动调档 开");
-                    } else {
-                        ui.log("自动调档 关");
-                    }
-                }
-                22 => {
-                    let _ = tx.try_send(BleCmd::Reconnect);
-                    ui.connected = false;
-                    ui.device = "重连中…".to_string();
-                    ui.log("已请求重连");
-                }
-                30..=37 => {
-                    // 自动调档上限：写入配置，重启保留
-                    let lv = (tag - 29) as u8;
-                    ui.auto_max = lv;
-                    ui.auto_last = None;
-                    config_set("auto_max", &lv.to_string());
-                    ui.log(format!("自动调档上限 → {lv} 档（已保存）"));
-                }
-                99 => std::process::exit(0),
-                _ => {}
-            }
+        #[method(btnAction:)]
+        unsafe fn btn_action(&self, sender: Option<&NSButton>) {
+            let Some(s) = sender else { return };
+            dispatch_action(s.tag());
+        }
+
+        #[method(statusClick:)]
+        unsafe fn status_click(&self, _sender: Option<&NSButton>) {
+            toggle_popover();
+        }
+
+        #[method(limitChanged:)]
+        unsafe fn limit_changed(&self, sender: Option<&NSPopUpButton>) {
+            let Some(p) = sender else { return };
+            let idx = unsafe { p.indexOfSelectedItem() };
+            dispatch_action(29 + (idx + 1) as isize);
         }
 
         #[method(timerTick:)]
         unsafe fn timer_tick(&self, _timer: Option<&NSTimer>) {
             let Some(state) = SHARED_MB.get() else { return };
             let ui = state.lock().unwrap();
-
-            // 状态栏标题：只显示档位（温度在菜单里看）
-            let title = if ui.connected {
-                format!(
-                    "{}档",
-                    ui.level
-                        .map(|l| l.to_string())
-                        .unwrap_or_else(|| "?".into())
-                )
-            } else {
-                "重连中…".to_string()
-            };
-            #[allow(deprecated)]
-            STATUS_ITEM.with_borrow_mut(|slot| {
-                if let Some(item) = slot {
-                    unsafe { item.setTitle(Some(&*NSString::from_str(&title))) };
-                }
-            });
-
-            // 菜单勾选状态
-            MB_SUB_LIMIT.with_borrow_mut(|slot| {
-                if let Some(sub) = slot {
-                    for item in sub.itemArray().iter() {
-                        let tag = item.tag();
-                        if (30..=37).contains(&tag) {
-                            let state: i64 =
-                                if ui.auto_max == (tag - 29) as u8 { 1 } else { 0 };
-                            let _: () = unsafe { objc2::msg_send![item, setState: state] };
-                        }
-                    }
-                }
-            });
-            MB_MENU.with_borrow_mut(|slot| {
-                if let Some(menu) = slot {
-                    let items = menu.itemArray();
-                    for item in items.iter() {
-                        let tag = item.tag();
-                        let on = match tag {
-                            1..=8 => ui.level == Some(tag as u8),
-                            20 => ui.hall == Some(true),
-                            21 => ui.autopilot,
-                            30..=37 => ui.auto_max == (tag - 29) as u8,
-                            _ => continue,
-                        };
-                        let state: i64 = if on { 1 } else { 0 };
-                        let _: () = unsafe { objc2::msg_send![item, setState: state] };
-                    }
-                }
-            });
+            refresh_panel(&ui);
         }
     }
 );
+
+
+unsafe fn build_popover(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<NSPopover> {
+    let pop = NSPopover::new(mtm);
+    pop.setBehavior(NSPopoverBehavior::Transient);
+    pop.setContentSize(NSSize::new(300.0, 250.0));
+
+    let vc = NSViewController::new(mtm);
+    let view: Retained<NSView> = unsafe { objc2::msg_send_id![NSView::class(), new] };
+    view.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(300.0, 250.0)));
+
+    // 两行数值
+    let v1 = NSTextField::labelWithString(&NSString::from_str("散热片 --°C   CPU --°C"), mtm);
+    v1.setFrame(NSRect::new(NSPoint::new(15.0, 208.0), NSSize::new(270.0, 24.0)));
+    view.addSubview(&v1);
+    let v2 = NSTextField::labelWithString(&NSString::from_str("转速 -- rpm   功率 -- W"), mtm);
+    v2.setFrame(NSRect::new(NSPoint::new(15.0, 184.0), NSSize::new(270.0, 20.0)));
+    view.addSubview(&v2);
+    MB_VALUE1.with_borrow_mut(|slot| *slot = Some(v1));
+    MB_VALUE2.with_borrow_mut(|slot| *slot = Some(v2));
+
+    // 档位 1-8 按钮
+    let mut btns = Vec::new();
+    for i in 0..8isize {
+        let b = NSButton::buttonWithTitle_target_action(
+            &NSString::from_str(&(i + 1).to_string()),
+            Some(target),
+            Some(sel!(btnAction:)),
+            mtm,
+        );
+        b.setTag(i + 1);
+        b.setFrame(NSRect::new(
+            NSPoint::new(12.0 + i as f64 * 34.0, 135.0),
+            NSSize::new(30.0, 28.0),
+        ));
+        view.addSubview(&b);
+        btns.push(b);
+    }
+    MB_LEVEL_BTNS.with_borrow_mut(|slot| *slot = btns);
+
+    // 功能按钮
+    let mk = |tag: isize, title: &str, x: f64| {
+        let b = NSButton::buttonWithTitle_target_action(
+            &NSString::from_str(title),
+            Some(target),
+            Some(sel!(btnAction:)),
+            mtm,
+        );
+        b.setTag(tag);
+        b.setFrame(NSRect::new(NSPoint::new(x, 90.0), NSSize::new(62.0, 28.0)));
+        view.addSubview(&b);
+    };
+    mk(20, "制冷", 12.0);
+    mk(21, "自动", 78.0);
+    mk(22, "重连", 144.0);
+    mk(99, "退出", 210.0);
+
+    // 自动上限下拉
+    let popup = NSPopUpButton::new(mtm);
+    for l in 1..=8u8 {
+        popup.addItemWithTitle(&NSString::from_str(&format!("上限 {l} 档")));
+    }
+    popup.setFrame(NSRect::new(NSPoint::new(12.0, 48.0), NSSize::new(130.0, 26.0)));
+    popup.setTarget(Some(target));
+    popup.setAction(Some(sel!(limitChanged:)));
+    view.addSubview(&popup);
+    MB_LIMIT_POPUP.with_borrow_mut(|slot| *slot = Some(popup));
+
+    vc.setView(&view);
+    pop.setContentViewController(Some(&vc));
+
+    pop
+}
 
 unsafe fn setup_menubar(mtm: MainThreadMarker) -> Retained<NSStatusItem> {
     let app = NSApplication::sharedApplication(mtm);
@@ -2544,67 +2665,17 @@ unsafe fn setup_menubar(mtm: MainThreadMarker) -> Retained<NSStatusItem> {
     let target: Retained<MenuTarget> = unsafe { objc2::msg_send_id![MenuTarget::class(), new] };
     MB_TARGET.with_borrow_mut(|slot| *slot = Some(target.clone()));
 
-    let menu = NSMenu::new(mtm);
-
-    // 状态行：不可点击，timer 每秒刷新文字
-    let info = NSMenuItem::new(mtm);
-    unsafe { info.setTitle(&NSString::from_str("…")) };
-    info.setTag(-1isize);
-    menu.addItem(&info);
-
-    let sep1 = NSMenuItem::separatorItem(mtm);
-    menu.addItem(&sep1);
-
-    for l in 1..=8u8 {
-        let mi = NSMenuItem::new(mtm);
-        mi.setTag(l as isize);
-        unsafe { mi.setTitle(&NSString::from_str(&format!("第 {l} 档"))) };
-        unsafe { mi.setAction(Some(sel!(menuAction:))) };
-        mi.setTarget(Some(&target));
-        menu.addItem(&mi);
-    }
-
-    let sep2 = NSMenuItem::separatorItem(mtm);
-    menu.addItem(&sep2);
-
-    let mk = |tag: i32, title: &str| {
-        let mi = NSMenuItem::new(mtm);
-        mi.setTag(tag as isize);
-        unsafe { mi.setTitle(&NSString::from_str(title)) };
-        unsafe { mi.setAction(Some(sel!(menuAction:))) };
-        mi.setTarget(Some(&target));
-        menu.addItem(&mi);
-        mi
+    // 状态栏按钮：点击弹面板（替代旧菜单）
+    let btn = unsafe { item.button(mtm).expect("status item button") };
+    unsafe {
+        btn.setAction(Some(sel!(statusClick:)));
+        btn.setTarget(Some(&target));
     };
-    mk(20, "制冷开/关");
-    mk(21, "自动调档");
-    mk(22, "手动重连");
+    MB_STATUS_BTN.with_borrow_mut(|slot| *slot = Some(btn));
 
-    // 自动上限子菜单：点选即写入配置
-    let limit_parent = NSMenuItem::new(mtm);
-    unsafe { limit_parent.setTitle(&NSString::from_str("自动上限")) };
-    let sub = NSMenu::new(mtm);
-    for l in 1..=8u8 {
-        let mi = NSMenuItem::new(mtm);
-        mi.setTag(29 + l as isize);
-        unsafe { mi.setTitle(&NSString::from_str(&format!("最高 {l} 档"))) };
-        unsafe { mi.setAction(Some(sel!(menuAction:))) };
-        mi.setTarget(Some(&target));
-        sub.addItem(&mi);
-    }
-    limit_parent.setSubmenu(Some(&sub));
-    menu.addItem(&limit_parent);
-    MB_SUB_LIMIT.with_borrow_mut(|slot| *slot = Some(sub));
+    let pop = build_popover(mtm, &target);
+    MB_POPOVER.with_borrow_mut(|slot| *slot = Some(pop));
 
-    let sep3 = NSMenuItem::separatorItem(mtm);
-    menu.addItem(&sep3);
-    mk(99, "退出");
-
-    unsafe { item.setMenu(Some(&menu)) };
-
-    MB_MENU.with_borrow_mut(|slot| *slot = Some(menu));
-
-    // 每秒从共享状态刷新标题与勾选
     let timer = unsafe {
         NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
             1.0,
